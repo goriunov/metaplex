@@ -18,7 +18,7 @@ import { ipfsCreds, ipfsUpload } from '../helpers/upload/ipfs';
 
 import { StorageType } from '../helpers/storage-type';
 import { AssetKey } from '../types';
-import { chunks } from '../helpers/various';
+import { chunks, sleep } from '../helpers/various';
 import { nftStorageUpload } from '../helpers/upload/nft-storage';
 
 export async function uploadV2({
@@ -95,7 +95,6 @@ export async function uploadV2({
   }
 
   const dedupedAssetKeys = getAssetKeysNeedingUpload(cacheContent.items, files);
-  const SIZE = dedupedAssetKeys.length;
 
   const dirname = path.dirname(files[0]);
   let candyMachine = cacheContent.program.candyMachine
@@ -175,7 +174,7 @@ export async function uploadV2({
     );
   }
 
-  console.log('Uploading Size', SIZE, dedupedAssetKeys[0]);
+  console.log('Uploading Size', dedupedAssetKeys.length, dedupedAssetKeys[0]);
 
   if (dedupedAssetKeys.length) {
     if (
@@ -212,35 +211,39 @@ export async function uploadV2({
       }
       log.info('Upload done.');
     } else {
-      let lastPrinted = 0;
-      const tick = SIZE / 100; //print every one percent
+      const assetsPerBatch =
+        batchSize || Math.floor(dedupedAssetKeys.length / 10);
+      const numberOfBatches = Math.floor(
+        dedupedAssetKeys.length / assetsPerBatch,
+      );
+      log.info(
+        `Splitting ${dedupedAssetKeys.length} assets in batches of ${assetsPerBatch}, number of batches is ${numberOfBatches}`,
+      );
 
       await Promise.all(
-        chunks(Array.from(Array(SIZE).keys()), batchSize || 50).map(
-          async allIndexesInSlice => {
-            for (let i = 0; i < allIndexesInSlice.length; i++) {
-              const assetKey = dedupedAssetKeys[allIndexesInSlice[i]];
+        chunks(dedupedAssetKeys, assetsPerBatch).map(
+          async (assetsKeys, index) => {
+            for (const asset of assetsKeys) {
               const image = path.join(
                 dirname,
-                `${assetKey.index}${assetKey.mediaExt}`,
+                `${asset.index}${asset.mediaExt}`,
               );
               const manifest = getAssetManifest(
                 dirname,
-                assetKey.index.includes('json')
-                  ? assetKey.index
-                  : `${assetKey.index}.json`,
+                asset.index.includes('json')
+                  ? asset.index
+                  : `${asset.index}.json`,
               );
-              const manifestBuffer = Buffer.from(JSON.stringify(manifest));
 
-              if (
-                allIndexesInSlice[i] >= lastPrinted + tick ||
-                allIndexesInSlice[i] === 0
-              ) {
-                lastPrinted = allIndexesInSlice[i];
-                log.info(`Processing asset: ${allIndexesInSlice[i]}`);
-              }
+              const manifestBuffer = Buffer.from(JSON.stringify(manifest));
+              log.info(
+                `Processing asset: ${JSON.stringify(
+                  asset,
+                )} from batch [${index}] out of [${numberOfBatches}]`,
+              );
 
               let link, imageLink;
+
               try {
                 switch (storage) {
                   case StorageType.NftStorage:
@@ -273,12 +276,13 @@ export async function uploadV2({
                       image,
                       manifestBuffer,
                       manifest,
-                      assetKey.index,
+                      asset.index,
                     );
                 }
+
                 if (link && imageLink) {
-                  log.debug('Updating cache for ', allIndexesInSlice[i]);
-                  cacheContent.items[assetKey.index] = {
+                  log.debug('Updating cache for ', asset);
+                  cacheContent.items[asset.index] = {
                     link,
                     name: manifest.name,
                     onChain: false,
@@ -286,8 +290,11 @@ export async function uploadV2({
                   saveCache(cacheName, env, cacheContent);
                 }
               } catch (err) {
-                log.error(`Error uploading file ${assetKey}`, err);
-                i--;
+                log.error(
+                  `Error uploading ${JSON.stringify(asset)} asset (skipping)`,
+                  err,
+                );
+                await sleep(5000);
               }
             }
           },
